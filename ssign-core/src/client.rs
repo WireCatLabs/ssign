@@ -12,15 +12,10 @@ use reqwest::Url;
 use std::time::Duration;
 
 pub const API_BASE: &str = "https://cloudsign.webnotarius.pl";
-pub const API_HOST: &str = "cloudsign.webnotarius.pl";
 
-/// The only origin that may receive the bearer token or the login form.
 pub fn is_certum_origin(url: &Url) -> bool {
-    url.scheme() == "https"
-        && url.host_str() == Some(API_HOST)
-        && url.port().is_none()
-        && url.username().is_empty()
-        && url.password().is_none()
+    let certum = Url::parse(API_BASE).expect("API_BASE is a URL");
+    url.origin() == certum.origin() && url.username().is_empty() && url.password().is_none()
 }
 
 /// A bearer-authenticated client with automatic redirects disabled (we follow
@@ -36,7 +31,6 @@ pub fn client() -> Result<Client> {
         reqwest::header::HeaderValue::from_static("multipart/form-data, application/json"),
     );
     Client::builder()
-        .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
         .user_agent("ssign")
@@ -45,9 +39,7 @@ pub fn client() -> Result<Client> {
         .context("building API client")
 }
 
-/// Resolve an `atom:link` that may be absolute or root-relative. The server
-/// names this URL and the bearer token follows it, so anything outside
-/// Certum's origin is refused.
+/// Resolve an `atom:link` that may be absolute or root-relative.
 fn abs(link: &str) -> Result<Url> {
     let url = Url::parse(API_BASE)
         .and_then(|base| base.join(link))

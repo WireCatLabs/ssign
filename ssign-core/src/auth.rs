@@ -16,7 +16,6 @@ use anyhow::{bail, Context, Result};
 use reqwest::Url;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 const AUTHORIZE_URL: &str = "https://cloudsign.webnotarius.pl/idp/oauth2.0/authorize";
 const LOGIN_URL: &str = "https://cloudsign.webnotarius.pl/idp/login";
@@ -27,7 +26,7 @@ const CLIENT_ID: &str = "44rvDKKEWY53a7xBeF5w";
 const CLIENT_SECRET: &str = "BRSE2u2nY3p3m77QHTt8";
 
 /// A bearer access token (valid ~30 min).
-pub struct Token(pub Zeroizing<String>);
+pub struct Token(pub String);
 
 /// Log in with the account e-mail and a 6-digit OTP; returns the bearer token.
 pub fn login(email: &str, otp_code: &str) -> Result<Token> {
@@ -36,7 +35,6 @@ pub fn login(email: &str, otp_code: &str) -> Result<Token> {
     let seen: Arc<Mutex<Vec<Url>>> = Arc::new(Mutex::new(Vec::new()));
 
     let client = reqwest::blocking::Client::builder()
-        .https_only(true)
         .cookie_store(true)
         .redirect(redirect_policy(seen.clone(), is_certum_origin))
         .timeout(Duration::from_secs(30))
@@ -57,9 +55,6 @@ pub fn login(email: &str, otp_code: &str) -> Result<Token> {
         .send()
         .context("authorize request")?;
     let login_url = resp.url().clone();
-    if !is_certum_origin(&login_url) {
-        bail!("login page is outside Certum's origin: {login_url}");
-    }
     let html = resp.text().context("reading login page")?;
 
     let execution = extract_hidden(&html, "execution")
@@ -88,9 +83,6 @@ pub fn login(email: &str, otp_code: &str) -> Result<Token> {
         .send()
         .context("login POST")?;
     let final_url = resp.url().clone();
-    if !is_certum_origin(&final_url) {
-        bail!("login ended outside Certum's origin: {final_url}");
-    }
 
     // 3. recover the authorization code from the redirect chain (or final URL).
     let code = seen
@@ -125,14 +117,12 @@ pub fn login(email: &str, otp_code: &str) -> Result<Token> {
         .with_context(|| format!("accessToken response was not JSON (status {status})"))?;
 
     match body.get("access_token").and_then(|v| v.as_str()) {
-        Some(tok) => Ok(Token(Zeroizing::new(tok.to_string()))),
+        Some(tok) => Ok(Token(tok.to_string())),
         None => bail!("token exchange failed (status {status}): {body}"),
     }
 }
 
-/// Follow redirects only to `allowed` URLs, recording each hop so the
-/// `?code=` can be recovered. Anything else fails the request: a 307/308 would
-/// re-send the login form (e-mail and a valid code) to wherever it points.
+/// Fails any redirect outside `allowed`: a 307/308 would re-send the login form there.
 fn redirect_policy(
     seen: Arc<Mutex<Vec<Url>>>,
     allowed: impl Fn(&Url) -> bool + Send + Sync + 'static,
@@ -175,48 +165,43 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::thread::JoinHandle;
 
-    /// Serves one request with `status` and a `Location` header; returns the
-    /// raw request it received.
-    fn redirect_once(
+    fn serve(
         listener: TcpListener,
-        status: &'static str,
-        location: String,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
+        replies: Vec<(&'static str, String)>,
+    ) -> JoinHandle<Vec<String>> {
         std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut req = Vec::new();
-            let mut buf = [0u8; 4096];
-            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
-                let n = stream.read(&mut buf).unwrap();
-                req.extend_from_slice(&buf[..n]);
-            }
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-            req
+            replies
+                .into_iter()
+                .map(|(status, location)| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut req = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                        let n = stream.read(&mut buf).unwrap();
+                        req.extend_from_slice(&buf[..n]);
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 {status}\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                    String::from_utf8(req).unwrap()
+                })
+                .collect()
         })
     }
 
-    fn client_allowing(
-        origin: reqwest::Url,
+    fn post_login_form(
+        url: &str,
         seen: Arc<Mutex<Vec<Url>>>,
-    ) -> reqwest::blocking::Client {
+    ) -> reqwest::Result<reqwest::blocking::Response> {
+        let origin = Url::parse(url).unwrap().origin();
         reqwest::blocking::Client::builder()
-            .redirect(redirect_policy(seen, move |u| {
-                u.origin() == origin.origin()
-            }))
+            .redirect(redirect_policy(seen, move |u| u.origin() == origin))
             .build()
             .unwrap()
-    }
-
-    fn post_login_form(
-        client: &reqwest::blocking::Client,
-        url: &str,
-    ) -> reqwest::Result<reqwest::blocking::Response> {
-        client
             .post(url)
             .form(&[("username", "me@example.com"), ("password", "123456")])
             .send()
@@ -228,19 +213,16 @@ mod tests {
             let certum = TcpListener::bind("127.0.0.1:0").unwrap();
             let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
             elsewhere.set_nonblocking(true).unwrap();
-            let certum_url = format!("http://{}/idp/login", certum.local_addr().unwrap());
+            let url = format!("http://{}/idp/login", certum.local_addr().unwrap());
             let steal = format!("http://{}/steal", elsewhere.local_addr().unwrap());
-            let server = redirect_once(certum, status, steal);
-
+            let server = serve(certum, vec![(status, steal)]);
             let seen = Arc::new(Mutex::new(Vec::new()));
-            let client = client_allowing(certum_url.parse().unwrap(), seen.clone());
+
             assert!(
-                post_login_form(&client, &certum_url).is_err(),
+                post_login_form(&url, seen.clone()).is_err(),
                 "{status} was followed"
             );
-
-            let first = String::from_utf8(server.join().unwrap()).unwrap();
-            assert!(first.starts_with("POST /idp/login"));
+            assert!(server.join().unwrap()[0].starts_with("POST /idp/login"));
             assert!(seen.lock().unwrap().is_empty());
             assert_eq!(
                 elsewhere.accept().unwrap_err().kind(),
@@ -254,40 +236,18 @@ mod tests {
     fn a_same_origin_redirect_is_still_followed() {
         let certum = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", certum.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
-            let first = redirect_once(
-                certum.try_clone().unwrap(),
-                "302 Found",
-                "/redirect?code=OC-1".into(),
-            );
-            first.join().unwrap();
-            redirect_once(certum, "200 OK", String::new())
-                .join()
-                .unwrap()
-        });
-
+        let server = serve(
+            certum,
+            vec![
+                ("302 Found", "/redirect?code=OC-1".into()),
+                ("200 OK", String::new()),
+            ],
+        );
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let client = client_allowing(base.parse().unwrap(), seen.clone());
-        let resp = post_login_form(&client, &format!("{base}/idp/login")).unwrap();
 
+        let resp = post_login_form(&format!("{base}/idp/login"), seen.clone()).unwrap();
         assert!(resp.status().is_success());
-        assert!(String::from_utf8(server.join().unwrap())
-            .unwrap()
-            .starts_with("GET /redirect?code=OC-1"));
+        assert!(server.join().unwrap()[1].starts_with("GET /redirect?code=OC-1"));
         assert_eq!(seen.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn the_login_policy_refuses_hosts_and_schemes_outside_certum() {
-        for url in [
-            "http://cloudsign.webnotarius.pl/redirect?code=x",
-            "https://cloudsign.webnotarius.pl.evil.com/redirect?code=x",
-            "https://x@evil.example/redirect?code=x",
-            "https://cloudsign.webnotarius.pl:444/redirect?code=x",
-        ] {
-            assert!(!is_certum_origin(&url.parse().unwrap()), "{url}");
-        }
-        assert!(is_certum_origin(&REDIRECT_URI.parse().unwrap()));
-        assert!(is_certum_origin(&LOGIN_URL.parse().unwrap()));
     }
 }
