@@ -74,7 +74,6 @@ impl Totp {
         if secret.is_empty() {
             bail!("empty TOTP secret");
         }
-        // 10^digits must fit a u32 and the period divides the clock.
         if !(6..=8).contains(&digits) {
             bail!("unsupported TOTP digits: {digits} (expected 6 to 8)");
         }

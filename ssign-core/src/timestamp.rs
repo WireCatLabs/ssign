@@ -13,9 +13,6 @@ const OID_TST_INFO: &str = "1.2.840.113549.1.9.16.1.4";
 
 /// Request a timestamp over `signature` from the RFC3161 TSA at `url`; returns
 /// the DER `TimeStampToken` (a PKCS#7 ContentInfo).
-///
-/// The reply travels over plain HTTP, so it must echo this request's nonce and
-/// imprint: otherwise a token cut from another signature could be embedded.
 /// The TSA's own signature is left to Windows, which checks it on every file.
 pub fn fetch(url: &str, signature: &[u8]) -> Result<Vec<u8>> {
     let imprint: [u8; 32] = {
@@ -41,13 +38,12 @@ pub fn fetch(url: &str, signature: &[u8]) -> Result<Vec<u8>> {
     parse_response(&tsr, &imprint, &nonce)
 }
 
-/// A random positive INTEGER, DER-encoded. The first byte stays in 0x01..=0x7f
-/// so the encoding is minimal and can be compared byte for byte.
 fn new_nonce() -> Result<Vec<u8>> {
     let mut n = [0u8; 8];
     SystemRandom::new()
         .fill(&mut n)
         .map_err(|_| anyhow!("no randomness for the timestamp nonce"))?;
+    // A positive, minimal INTEGER, so the echoed nonce compares byte for byte.
     n[0] = (n[0] & 0x7f).max(1);
     Ok(asn1::tlv(0x02, &n))
 }
@@ -79,8 +75,8 @@ fn parse_response(tsr: &[u8], imprint: &[u8; 32], nonce: &[u8]) -> Result<Vec<u8
         bail!("TSA rejected the request (status {status})");
     }
     let token = top.get(1).context("TSR has no timeStampToken")?;
-    validate_timestamp_token(token)?;
-    check_tst_info(tst_info(token)?, imprint, nonce)?;
+    let signed_data = validate_timestamp_token(token)?;
+    check_tst_info(tst_info(signed_data)?, imprint, nonce)?;
     Ok(token.to_vec())
 }
 
@@ -88,10 +84,7 @@ fn der<T>(r: std::result::Result<T, &'static str>) -> Result<T> {
     r.map_err(|e| anyhow!("bad timeStampToken: {e}"))
 }
 
-/// The DER `TSTInfo` inside a token that `validate_timestamp_token` accepted.
-fn tst_info(token: &[u8]) -> Result<&[u8]> {
-    let content_info = der(asn1::children(token))?;
-    let signed_data = der(asn1::children(content_info[1]))?[0];
+fn tst_info(signed_data: &[u8]) -> Result<&[u8]> {
     let encap = *der(asn1::children(signed_data))?
         .get(2)
         .context("SignedData is truncated")?;
@@ -136,7 +129,7 @@ fn check_tst_info(tst_info: &[u8], imprint: &[u8; 32], nonce: &[u8]) -> Result<(
     }
 }
 
-fn validate_timestamp_token(token: &[u8]) -> Result<()> {
+fn validate_timestamp_token(token: &[u8]) -> Result<&[u8]> {
     if token.first() != Some(&0x30) {
         bail!("timeStampToken is not a DER SEQUENCE");
     }
@@ -153,7 +146,7 @@ fn validate_timestamp_token(token: &[u8]) -> Result<()> {
     if signed_data.len() != 1 || signed_data[0].first() != Some(&0x30) {
         bail!("CMS SignedData wrapper did not contain SignedData");
     }
-    Ok(())
+    Ok(signed_data[0])
 }
 
 #[cfg(test)]
@@ -173,7 +166,7 @@ mod tests {
 
     const IMPRINT: [u8; 32] = [7; 32];
 
-    fn tst_info(imprint: &[u8], alg: &str, nonce: Option<&[u8]>) -> Vec<u8> {
+    fn make_tst_info(imprint: &[u8], alg: &str, nonce: Option<&[u8]>) -> Vec<u8> {
         let mut fields = vec![
             asn1::int_one(),
             asn1::oid("1.2.616.1.113527.2.5.1.7"),
@@ -217,7 +210,7 @@ mod tests {
     #[test]
     fn accepts_a_reply_that_echoes_the_nonce_and_imprint() {
         let nonce = new_nonce().unwrap();
-        let tsr = reply(&tst_info(&IMPRINT, OID_SHA256, Some(&nonce)));
+        let tsr = reply(&make_tst_info(&IMPRINT, OID_SHA256, Some(&nonce)));
         let token = parse_response(&tsr, &IMPRINT, &nonce).unwrap();
         assert_eq!(token.as_slice(), asn1::children(&tsr).unwrap()[1]);
     }
@@ -226,7 +219,7 @@ mod tests {
     fn rejects_a_reply_with_another_nonce() {
         let nonce = new_nonce().unwrap();
         let other = new_nonce().unwrap();
-        let tsr = reply(&tst_info(&IMPRINT, OID_SHA256, Some(&other)));
+        let tsr = reply(&make_tst_info(&IMPRINT, OID_SHA256, Some(&other)));
         let err = parse_response(&tsr, &IMPRINT, &nonce).unwrap_err();
         assert!(err.to_string().contains("nonce mismatch"), "{err}");
     }
@@ -234,14 +227,14 @@ mod tests {
     #[test]
     fn rejects_a_reply_without_a_nonce() {
         let nonce = new_nonce().unwrap();
-        let tsr = reply(&tst_info(&IMPRINT, OID_SHA256, None));
+        let tsr = reply(&make_tst_info(&IMPRINT, OID_SHA256, None));
         assert!(parse_response(&tsr, &IMPRINT, &nonce).is_err());
     }
 
     #[test]
     fn rejects_a_reply_for_another_imprint() {
         let nonce = new_nonce().unwrap();
-        let tsr = reply(&tst_info(&[8; 32], OID_SHA256, Some(&nonce)));
+        let tsr = reply(&make_tst_info(&[8; 32], OID_SHA256, Some(&nonce)));
         let err = parse_response(&tsr, &IMPRINT, &nonce).unwrap_err();
         assert!(err.to_string().contains("messageImprint"), "{err}");
     }
@@ -249,12 +242,10 @@ mod tests {
     #[test]
     fn rejects_an_imprint_made_with_another_hash() {
         let nonce = new_nonce().unwrap();
-        let tsr = reply(&tst_info(&IMPRINT, "1.3.14.3.2.26", Some(&nonce)));
+        let tsr = reply(&make_tst_info(&IMPRINT, "1.3.14.3.2.26", Some(&nonce)));
         assert!(parse_response(&tsr, &IMPRINT, &nonce).is_err());
     }
 
-    /// Talks to Certum's public TSA (no account involved). Run with
-    /// `cargo test -p ssign-core -- --ignored real_tsa`.
     #[test]
     #[ignore = "network: asks http://time.certum.pl/ for a real timestamp"]
     fn real_tsa_reply_passes_the_nonce_and_imprint_checks() {

@@ -253,7 +253,6 @@ pub fn finalize(
     timestamp_token: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let cert = x509_cert::Certificate::from_der(cert_der).context("parsing signing certificate")?;
-    // Embedding a bad signature would ship a file Windows calls tampered with.
     let public_key = cert
         .tbs_certificate()
         .subject_public_key_info()

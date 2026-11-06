@@ -52,7 +52,7 @@ impl CloudSession {
     /// Log in (email + current 6-digit code) and materialize the card,
     /// certificate and the derived key descriptors.
     pub fn open(email: &str, otp_code: &str) -> Result<Self> {
-        let token = auth::login(email, otp_code)?.0;
+        let token = Zeroizing::new(auth::login(email, otp_code)?.0);
         let http = client::client()?;
         let card = card::fetch(&http, &token)?;
         Self::from_parts(http, token, card)
