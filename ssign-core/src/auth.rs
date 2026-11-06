@@ -208,6 +208,13 @@ mod tests {
     }
 
     #[test]
+    fn the_login_urls_are_on_certums_origin() {
+        for url in [AUTHORIZE_URL, LOGIN_URL, TOKEN_URL, REDIRECT_URI] {
+            assert!(is_certum_origin(&url.parse().unwrap()), "{url}");
+        }
+    }
+
+    #[test]
     fn a_cross_origin_307_or_308_never_receives_the_login_form() {
         for status in ["307 Temporary Redirect", "308 Permanent Redirect"] {
             let certum = TcpListener::bind("127.0.0.1:0").unwrap();
