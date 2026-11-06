@@ -4,7 +4,8 @@ A fork of [Le-Syl21/ssign](https://github.com/Le-Syl21/ssign), MIT like upstream
 the Windows installer with it, pinned to a full commit SHA of this repository.
 
 Base: upstream `44335a75d23a0396c9f890e75fdfd60769cf377c` (`v0.1.10`).
-The code is upstream's as is: our hardening patches were merged there in [Le-Syl21/ssign#20](https://github.com/Le-Syl21/ssign/pull/20). `FORK.md` and `deny.toml` exist only here.
+The code is upstream's as is: our hardening patches were merged there in
+[Le-Syl21/ssign#20](https://github.com/Le-Syl21/ssign/pull/20). `FORK.md` and `deny.toml` exist only here.
 
 ## Taking an upstream update
 
