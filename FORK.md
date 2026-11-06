@@ -32,4 +32,4 @@ Each is also a branch cut from upstream `main`, ready to offer upstream:
    cargo deny check
    ```
 3. Squash-merge, update the base above, and pin the new `main` SHA in the release:
-   `cargo install --locked --git https://github.com/WireCatLabs/ssign --rev <SHA>`.
+   `cargo install --locked --git https://github.com/WireCatLabs/ssign --rev <SHA> ssign`.
