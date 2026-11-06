@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 use reqwest::Url;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 const AUTHORIZE_URL: &str = "https://cloudsign.webnotarius.pl/idp/oauth2.0/authorize";
 const LOGIN_URL: &str = "https://cloudsign.webnotarius.pl/idp/login";
@@ -26,7 +27,7 @@ const CLIENT_ID: &str = "44rvDKKEWY53a7xBeF5w";
 const CLIENT_SECRET: &str = "BRSE2u2nY3p3m77QHTt8";
 
 /// A bearer access token (valid ~30 min).
-pub struct Token(pub String);
+pub struct Token(pub Zeroizing<String>);
 
 /// Log in with the account e-mail and a 6-digit OTP; returns the bearer token.
 pub fn login(email: &str, otp_code: &str) -> Result<Token> {
@@ -124,7 +125,7 @@ pub fn login(email: &str, otp_code: &str) -> Result<Token> {
         .with_context(|| format!("accessToken response was not JSON (status {status})"))?;
 
     match body.get("access_token").and_then(|v| v.as_str()) {
-        Some(tok) => Ok(Token(tok.to_string())),
+        Some(tok) => Ok(Token(Zeroizing::new(tok.to_string()))),
         None => bail!("token exchange failed (status {status}): {body}"),
     }
 }
