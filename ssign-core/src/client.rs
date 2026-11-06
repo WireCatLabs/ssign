@@ -8,9 +8,20 @@
 
 use anyhow::{bail, Context, Result};
 use reqwest::blocking::{Client, RequestBuilder};
+use reqwest::Url;
 use std::time::Duration;
 
 pub const API_BASE: &str = "https://cloudsign.webnotarius.pl";
+pub const API_HOST: &str = "cloudsign.webnotarius.pl";
+
+/// The only origin that may receive the bearer token or the login form.
+pub fn is_certum_origin(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(API_HOST)
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
 
 /// A bearer-authenticated client with automatic redirects disabled (we follow
 /// `atom:link` ourselves, so a 303 must not be swallowed).
@@ -25,6 +36,7 @@ pub fn client() -> Result<Client> {
         reqwest::header::HeaderValue::from_static("multipart/form-data, application/json"),
     );
     Client::builder()
+        .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(60))
         .user_agent("ssign")
@@ -33,15 +45,17 @@ pub fn client() -> Result<Client> {
         .context("building API client")
 }
 
-/// Resolve an `atom:link` that may be absolute or root-relative.
-fn abs(link: &str) -> String {
-    if link.starts_with("http") {
-        link.to_string()
-    } else if let Some(rest) = link.strip_prefix('/') {
-        format!("{API_BASE}/{rest}")
-    } else {
-        format!("{API_BASE}/{link}")
+/// Resolve an `atom:link` that may be absolute or root-relative. The server
+/// names this URL and the bearer token follows it, so anything outside
+/// Certum's origin is refused.
+fn abs(link: &str) -> Result<Url> {
+    let url = Url::parse(API_BASE)
+        .and_then(|base| base.join(link))
+        .context("task link is not a URL")?;
+    if !is_certum_origin(&url) {
+        bail!("task link points outside {API_BASE}; refusing to send the token there");
     }
+    Ok(url)
 }
 
 /// Send `initial` (a POST already carrying auth + body), then follow `atom:link`
@@ -87,7 +101,7 @@ pub fn run_task(
                     let ping = v.get("ping-after").and_then(|x| x.as_u64()).unwrap_or(0);
                     std::thread::sleep(Duration::from_millis(ping.clamp(200, 2000)));
                     resp = client
-                        .get(abs(link))
+                        .get(abs(link)?)
                         .bearer_auth(token)
                         .send()
                         .context("task poll")?;
@@ -168,6 +182,43 @@ fn trim_crlf(b: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_certum_task_links() {
+        let task = "/scs1/card/v1/cards/123/certificates/signature/task/abc";
+        for link in [
+            task.to_string(),
+            task.trim_start_matches('/').to_string(),
+            format!("{API_BASE}{task}"),
+            format!("https://CLOUDSIGN.webnotarius.pl:443{task}"),
+        ] {
+            let url = abs(&link).unwrap();
+            assert_eq!(url.as_str(), format!("{API_BASE}{task}"), "{link}");
+        }
+    }
+
+    #[test]
+    fn refuses_task_links_outside_certum() {
+        for link in [
+            "https://evil.example/poll",
+            "http://cloudsign.webnotarius.pl/poll",
+            "//evil.example/poll",
+            "https:\\\\evil.example/poll",
+            "https://cloudsign.webnotarius.pl.evil.com/poll",
+            "https://evil.com/cloudsign.webnotarius.pl/poll",
+            "https://x@evil.example/poll",
+            "https://cloudsign.webnotarius.pl@evil.example/poll",
+            "https://user:pw@cloudsign.webnotarius.pl/poll",
+            "https://cloudsign.webnotarius.pl:8443/poll",
+            "https://cloudsign.webnotarius.pl./poll",
+            "https://cloudsign.webnotarius.pl%2Eevil.com/poll",
+            "https://cloudsign%2Ewebnotarius%2Epl%2Eevil%2Ecom/poll",
+            "https://xn--cloudsign-webnotarius-pl.example/poll",
+            "ftp://cloudsign.webnotarius.pl/poll",
+        ] {
+            assert!(abs(link).is_err(), "{link} was accepted");
+        }
+    }
 
     #[test]
     fn extracts_named_part() {
