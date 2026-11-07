@@ -3,9 +3,11 @@
 A fork of [Le-Syl21/ssign](https://github.com/Le-Syl21/ssign), MIT like upstream. WireCat Desktop's release signs
 the Windows installer with it, pinned to a full commit SHA of this repository.
 
-Base: upstream `44335a75d23a0396c9f890e75fdfd60769cf377c` (`v0.1.10`).
-The code is upstream's as is: our hardening patches were merged there in
-[Le-Syl21/ssign#20](https://github.com/Le-Syl21/ssign/pull/20). `FORK.md` and `deny.toml` exist only here.
+Base: upstream `367bf7d3da14d5041d5e47f855ae2397b8028e33` (`v0.1.11`).
+The code is upstream's as is: our patches were merged there in
+[Le-Syl21/ssign#20](https://github.com/Le-Syl21/ssign/pull/20) (hardening) and
+[Le-Syl21/ssign#21](https://github.com/Le-Syl21/ssign/pull/21) (overwrite a file Windows holds open).
+`FORK.md` and `deny.toml` exist only here.
 
 ## Taking an upstream update
 
