@@ -246,8 +246,17 @@ fn write_signed_file(
             publish_backup(input, out, original)?;
         }
 
-        atomic_replace(&signed_temp, out)
-            .with_context(|| format!("atomically replacing {}", out.display()))?;
+        match atomic_replace(&signed_temp, out) {
+            // Windows refuses to replace a file another process holds open. Tauri's bundler keeps the
+            // exe open while it runs the sign command, but lets others write to it.
+            Err(err) if cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied => {
+                overwrite_in_place(out, signed)?;
+                let _ = fs::remove_file(&signed_temp);
+            }
+            replaced => {
+                replaced.with_context(|| format!("atomically replacing {}", out.display()))?
+            }
+        }
         Ok(())
     })();
 
@@ -255,6 +264,17 @@ fn write_signed_file(
         let _ = fs::remove_file(&signed_temp);
     }
     result
+}
+
+fn overwrite_in_place(out: &Path, contents: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(out)
+        .with_context(|| format!("opening {} to overwrite it", out.display()))?;
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("overwriting {}", out.display()))
 }
 
 fn publish_backup(input: &Path, out: &Path, original: &[u8]) -> Result<()> {
@@ -350,46 +370,17 @@ fn atomic_replace(temp: &Path, out: &Path) -> io::Result<()> {
 
     let temp_wide: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
     let out_wide: Vec<u16> = out.as_os_str().encode_wide().chain(Some(0)).collect();
-    retry_while_locked(std::time::Duration::from_millis(100), || {
-        if unsafe {
-            MoveFileExW(
-                temp_wide.as_ptr(),
-                out_wide.as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        } == 0
-        {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
-    })
-}
-
-/// A virus scanner or the search indexer can hold a freshly written file for a
-/// moment, and replacing it then fails with access denied or a sharing
-/// violation. With a 100 ms step this waits up to about 5.5 s.
-#[cfg(any(windows, test))]
-fn retry_while_locked(
-    step: std::time::Duration,
-    mut replace: impl FnMut() -> io::Result<()>,
-) -> io::Result<()> {
-    const ATTEMPTS: u32 = 10;
-    const ERROR_SHARING_VIOLATION: i32 = 32;
-
-    let mut attempt = 1;
-    loop {
-        match replace() {
-            Err(err)
-                if attempt < ATTEMPTS
-                    && (err.kind() == io::ErrorKind::PermissionDenied
-                        || err.raw_os_error() == Some(ERROR_SHARING_VIOLATION)) =>
-            {
-                std::thread::sleep(step * attempt);
-                attempt += 1;
-            }
-            result => return result,
-        }
+    if unsafe {
+        MoveFileExW(
+            temp_wide.as_ptr(),
+            out_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -416,40 +407,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retry_while_locked_retries_a_denied_replace_until_it_succeeds() {
-        let mut calls = 0;
-        let result = retry_while_locked(std::time::Duration::ZERO, || {
-            calls += 1;
-            if calls < 3 {
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            } else {
-                Ok(())
-            }
-        });
-        assert!(result.is_ok());
-        assert_eq!(calls, 3);
-    }
+    fn overwrite_in_place_writes_through_a_handle_someone_else_holds() {
+        let dir = unique_test_dir("overwrite-held");
+        let out = dir.join("app.exe");
+        fs::write(&out, b"unsigned and longer").unwrap();
+        let held = File::open(&out).unwrap();
 
-    #[test]
-    fn retry_while_locked_gives_up_after_ten_attempts() {
-        let mut calls = 0;
-        let result = retry_while_locked(std::time::Duration::ZERO, || {
-            calls += 1;
-            Err(io::Error::from(io::ErrorKind::PermissionDenied))
-        });
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(calls, 10);
-    }
+        overwrite_in_place(&out, b"signed").unwrap();
 
-    #[test]
-    fn retry_while_locked_does_not_retry_other_errors() {
-        let mut calls = 0;
-        let result = retry_while_locked(std::time::Duration::ZERO, || {
-            calls += 1;
-            Err(io::Error::from(io::ErrorKind::NotFound))
-        });
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(calls, 1);
+        drop(held);
+        assert_eq!(fs::read(&out).unwrap(), b"signed");
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn unique_test_dir(label: &str) -> PathBuf {
